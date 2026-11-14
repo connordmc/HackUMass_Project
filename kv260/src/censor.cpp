@@ -54,39 +54,36 @@ bool expand_and_clip(const Box& box, float margin, int image_width,
   return true;
 }
 
-static void obscure_plane(cv::Mat roi, int blocks) {
-  cv::Mat small;
-  cv::resize(roi, small,
-             cv::Size(std::min(blocks, roi.cols), std::min(blocks, roi.rows)),
-             0, 0, cv::INTER_AREA);
-  cv::GaussianBlur(small, small, cv::Size(5, 5), 2.0);
-  // roi already has the right size and type, so resize writes in place.
-  cv::resize(small, roi, roi.size(), 0, 0, cv::INTER_LINEAR);
-}
-
-void obscure_region(Nv12View& image, const cv::Rect& region, int blocks) {
+void fill_region(Nv12View& image, const cv::Rect& region) {
   check_view(image);
-  if (blocks < 1) throw std::invalid_argument("blocks must be >= 1");
   const cv::Rect bounds(0, 0, image.width, image.height);
   if ((region & bounds) != region || region.empty() || region.x % 2 ||
       region.y % 2 || region.width % 2 || region.height % 2) {
     throw std::invalid_argument("region must be even-aligned and in bounds");
   }
-  obscure_plane(image.y_plane()(region), blocks);
+  image.y_plane()(region).setTo(cv::Scalar(16));
   const cv::Rect chroma(region.x / 2, region.y / 2, region.width / 2,
                         region.height / 2);
-  obscure_plane(image.uv_plane()(chroma), std::max(1, blocks / 2));
+  image.uv_plane()(chroma).setTo(cv::Scalar(128, 128));
 }
 
-void censor_nv12(Nv12View& image, const std::vector<Box>& boxes, float margin,
-                 int blocks) {
+int censor_nv12(Nv12View& image, const std::vector<Box>& boxes, float margin) {
   check_view(image);
+  int filled = 0;
   for (const Box& box : boxes) {
     cv::Rect region;
     if (expand_and_clip(box, margin, image.width, image.height, region)) {
-      obscure_region(image, region, blocks);
+      fill_region(image, region);
+      ++filled;
     }
   }
+  return filled;
+}
+
+bool scrub_nv12(Nv12View& image, const std::vector<Box>& boxes, float margin) {
+  if (censor_nv12(image, boxes, margin) > 0) return true;
+  fill_black(image);  // no current face: nothing of this frame goes out
+  return false;
 }
 
 void fill_black(Nv12View& image) {
@@ -122,10 +119,13 @@ float iou(const Box& a, const Box& b) {
   return uni > 0 ? inter / uni : 0.f;
 }
 
-BoxHold::BoxHold(int hold_frames, float match_iou)
-    : hold_frames_(std::max(0, hold_frames)), match_iou_(match_iou) {}
+BoxHold::BoxHold(std::chrono::milliseconds max_age, float match_iou)
+    : max_age_(max_age), match_iou_(match_iou) {
+  if (max_age_.count() <= 0) throw std::invalid_argument("max_age must be > 0");
+}
 
-std::vector<Box> BoxHold::update(const std::vector<Box>& detections) {
+std::vector<Box> BoxHold::update(const std::vector<Box>& detections,
+                                 Clock::time_point captured_at) {
   std::vector<bool> used(detections.size(), false);
   for (Track& track : tracks_) {
     int best = -1;
@@ -141,19 +141,20 @@ std::vector<Box> BoxHold::update(const std::vector<Box>& detections) {
     if (best >= 0) {
       used[best] = true;
       track.box = detections[best];
-      track.missed = 0;
-    } else {
-      ++track.missed;
+      track.last_seen = captured_at;
     }
   }
+  for (size_t i = 0; i < detections.size(); ++i) {
+    if (!used[i]) tracks_.push_back({detections[i], captured_at});
+  }
+  // Drop stale tracks, and any stamped in the future (clock misuse): neither
+  // can vouch for where a face is in this frame.
   tracks_.erase(std::remove_if(tracks_.begin(), tracks_.end(),
-                               [this](const Track& t) {
-                                 return t.missed > hold_frames_;
+                               [&](const Track& t) {
+                                 return t.last_seen > captured_at ||
+                                        captured_at - t.last_seen > max_age_;
                                }),
                 tracks_.end());
-  for (size_t i = 0; i < detections.size(); ++i) {
-    if (!used[i]) tracks_.push_back({detections[i], 0});
-  }
   std::vector<Box> out;
   out.reserve(tracks_.size());
   for (const Track& track : tracks_) out.push_back(track.box);

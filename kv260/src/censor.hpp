@@ -1,7 +1,14 @@
-// NV12 face censoring. Pure OpenCV: no GStreamer or Vitis AI, so it is unit
-// tested on any machine.
+// NV12 face censoring, fail-closed. Pure OpenCV: no GStreamer or Vitis AI,
+// so it is unit tested on any machine.
+//
+// Policy (same as the Python prototype, faceshield/scrubber.py):
+//  - every current face box is overwritten with a constant fill (video black);
+//    the original pixels are destroyed, not blurred;
+//  - a box stays current for max_age after the detector last saw it;
+//  - if no box is current, the whole frame is blacked out.
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <vector>
 
@@ -37,15 +44,19 @@ struct Nv12View {
 bool expand_and_clip(const Box& box, float margin, int image_width,
                      int image_height, cv::Rect& out);
 
-// Obscures one even-aligned region in both planes: reduce it to at most
-// `blocks` x `blocks` samples, smooth, and scale back up.
-void obscure_region(Nv12View& image, const cv::Rect& region, int blocks);
+// Overwrites one even-aligned, in-bounds region in both planes with black
+// (Y = 16, UV = 128). The original pixels are gone afterwards.
+void fill_region(Nv12View& image, const cv::Rect& region);
 
-// Obscures every valid box. Invalid boxes are ignored.
-void censor_nv12(Nv12View& image, const std::vector<Box>& boxes, float margin,
-                 int blocks);
+// Fills every valid box. Invalid boxes are ignored. Returns how many regions
+// were filled.
+int censor_nv12(Nv12View& image, const std::vector<Box>& boxes, float margin);
 
-// Overwrites the whole image with black (used when detection fails).
+// Fail-closed scrub: fills every valid box and returns true, or, if no box
+// maps to a valid region, blacks out the whole frame and returns false.
+bool scrub_nv12(Nv12View& image, const std::vector<Box>& boxes, float margin);
+
+// Overwrites the whole image with black.
 void fill_black(Nv12View& image);
 
 // Cheap BGR thumbnail for the detector: scales the NV12 planes first, then
@@ -55,20 +66,28 @@ cv::Mat small_bgr_from_nv12(const Nv12View& image, int out_width,
 
 float iou(const Box& a, const Box& b);
 
-// Keeps each face covered for `hold_frames` frames after the detector stops
-// reporting it, so a single missed detection does not expose a face.
+// Keeps each face covered for `max_age` after the detector last reported it,
+// so a brief miss does not expose a face. Time-based, so a slow frame rate
+// cannot stretch how long a stale box is trusted. Each face is tracked
+// separately: if one of two faces is missed, both stay covered.
 class BoxHold {
  public:
-  BoxHold(int hold_frames, float match_iou);
-  std::vector<Box> update(const std::vector<Box>& detections);
+  using Clock = std::chrono::steady_clock;
+
+  BoxHold(std::chrono::milliseconds max_age, float match_iou);
+  // Adds this frame's detections (captured at `captured_at`) and returns every
+  // box that is still current at `captured_at`. A track whose last sighting is
+  // older than max_age, or in the future, is dropped.
+  std::vector<Box> update(const std::vector<Box>& detections,
+                          Clock::time_point captured_at);
   void clear() { tracks_.clear(); }
 
  private:
   struct Track {
     Box box;
-    int missed = 0;
+    Clock::time_point last_seen;
   };
-  int hold_frames_;
+  std::chrono::milliseconds max_age_;
   float match_iou_;
   std::vector<Track> tracks_;
 };

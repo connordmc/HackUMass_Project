@@ -32,6 +32,19 @@ if have media-ctl && [ -e "$MEDIA" ]; then
 else
   warn "media-ctl not available; skipped media graph check"
 fi
+# The AP1302 ISP is on the carrier board, so it appears in the media graph
+# even when the AR1335 sensor behind it is unplugged or unpowered. The ISP
+# logs "NACK 0x6c" when the sensor does not answer on I2C (seen when a capture
+# is attempted), so check the kernel log as well.
+if have journalctl; then
+  if journalctl -k -b --no-pager 2>/dev/null | grep -q 'NACK 0x6c'; then
+    fail "AR1335 sensor is not answering the AP1302 (NACK 0x6c in the kernel log): power off, reseat the ribbon cable on J7 (IAS0), contacts facing the connector's contacts, latches closed"
+  else
+    pass "no AR1335 I2C errors in the kernel log since boot (only meaningful after a capture attempt)"
+  fi
+else
+  warn "journalctl not available (normal inside the container); run this on the host to check the sensor"
+fi
 
 echo "== GStreamer elements"
 for e in mediasrcbin omxh264enc h264parse mpegtsmux tcpserversink rtph264pay appsrc appsink; do

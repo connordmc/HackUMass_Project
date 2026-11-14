@@ -1,7 +1,7 @@
 """Watch the censored FaceShield stream coming from the KV260.
 
-The laptop only decodes and displays. All detection and blurring happen on
-the board, so this program never sees an unblurred frame.
+The laptop only decodes and displays. All detection and masking happen on
+the board, so this program never sees an unmasked frame.
 
     python kv260/laptop/viewer.py --host 192.168.1.50           # TCP (default)
     python kv260/laptop/viewer.py --sdp kv260/laptop/stream.sdp  # UDP / RTP

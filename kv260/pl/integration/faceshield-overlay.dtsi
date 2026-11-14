@@ -1,0 +1,42 @@
+// Device-tree additions for the kv260-faceshield firmware. UNTESTED SKETCH:
+// merge into the overlay that xsct/createdts generates from the new .xsa, and
+// replace the addresses, interrupts and labels with the generated ones.
+//
+// 1. The scrubber's AXI-Lite registers, exposed to userspace as UIO
+//    (/dev/uioN). The kernel needs uio_pdrv_genirq with of_id=generic-uio,
+//    e.g. bootargs "uio_pdrv_genirq.of_id=generic-uio" or
+//    `options uio_pdrv_genirq of_id=generic-uio` in /etc/modprobe.d/.
+&amba {
+	faceshield_scrubber: faceshield-scrubber@b0020000 {
+		compatible = "generic-uio";
+		reg = <0x0 0xb0020000 0x0 0x10000>;   // from the Vivado address map
+	};
+};
+
+// 2. The raw frame buffer as a second DMA channel of the existing video
+//    capture node, so V4L2 exposes it as a second /dev/videoN. Both channels
+//    are fed from the CSI-2 RX subsystem's source port (the broadcaster in
+//    between is not a V4L2 entity), which needs a second endpoint on that port.
+&isp_vcap_csi {
+	dmas = <&v_frmbuf_wr_0 0>, <&faceshield_raw_fb 0>;
+	dma-names = "port0", "port1";
+	ports {
+		port@1 {
+			reg = <1>;
+			direction = "input";
+			vcap_raw_in: endpoint {
+				remote-endpoint = <&csiss_out_raw>;
+			};
+		};
+	};
+};
+
+&mipi_csi2_rx_subsyst_0 {
+	ports {
+		port@1 {
+			csiss_out_raw: endpoint@1 {
+				remote-endpoint = <&vcap_raw_in>;
+			};
+		};
+	};
+};

@@ -14,7 +14,8 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(GST REQUIRED IMPORTED_TARGET
   gstreamer-1.0 gstreamer-app-1.0 gstreamer-video-1.0)
 
-add_library(faceshield_core STATIC src/censor.cpp src/pipeline.cpp)
+add_library(faceshield_core STATIC src/censor.cpp src/pipeline.cpp
+  src/pl_scrubber.cpp)
 target_include_directories(faceshield_core PUBLIC src ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(faceshield_core PUBLIC ${OpenCV_LIBS})
 target_compile_options(faceshield_core PRIVATE -Wall -Wextra)
@@ -48,3 +49,8 @@ enable_testing()
 add_executable(test_censor tests/test_censor.cpp)
 target_link_libraries(test_censor PRIVATE faceshield_core)
 add_test(NAME censor COMMAND test_censor)
+
+# PL scrubber logic (same code the HLS IP is built from), host compiler only.
+add_executable(tb_scrubber pl/scrubber/tb_scrubber.cpp)
+target_compile_options(tb_scrubber PRIVATE -Wall -Wextra -Wno-unknown-pragmas)
+add_test(NAME pl_scrubber COMMAND tb_scrubber)

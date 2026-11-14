@@ -1,9 +1,14 @@
 # FaceShield on the Kria KV260
 
 Everything runs on the board: the AR1335 IAS camera feeds the KV260, faces are
-found on the DPU, blurred on the board, compressed by the hardware video
-encoder, and only the censored H.264 stream goes over Ethernet. The laptop just
-decodes and displays it.
+found on the DPU, overwritten with black on the board, compressed by the
+hardware video encoder, and only the scrubbed H.264 stream goes over Ethernet.
+The laptop just decodes and displays it.
+
+It is **fail-closed**: a frame is only sent with a picture in it if the
+detector currently knows where every face is. If no face is current (nobody
+in view, a missed detection older than 250 ms, or a detector error), the whole
+frame is black.
 
 ```
  AR1335 IAS camera (13 MP, 1/3.2")
@@ -17,16 +22,17 @@ decodes and displays it.
         │                          ▼                     │  KV260
         │                 densebox_640_360 on DPU        │
         │                          │ face boxes          │
-        │                 hold boxes ~5 frames, +25 %    │
+        │                 hold boxes 250 ms, +25 %       │
         ▼                          │                     │
- blur faces in NV12 ◄──────────────┘                     │
- (detector error → whole frame black)                    │
+ fill faces black in NV12 ◄────────┘                     │
+ (no current face or detector error                      │
+  → whole frame black)                                   │
         │                                                │
         ▼                                                │
  VCU hardware H.264 (omxh264enc)                         │
         │                                                ┘
         ▼  Ethernet: MPEG-TS over TCP :5000 (or RTP/UDP)
- Laptop: viewer.py / ffplay  (never receives an unblurred frame)
+ Laptop: viewer.py / ffplay  (never receives an unmasked frame)
 ```
 
 ## Detector: why AMD's densebox model instead of YOLO
@@ -41,8 +47,8 @@ Camera app, rather than the YOLO model in the top-level README:
 - **It is already compiled for the DPU in the Smart Camera bitstream**, so it
   runs at camera frame rate with no toolchain work.
 - It finds several faces per frame, and `--threshold` trades misses for false
-  alarms. For privacy, err low: a false alarm blurs a bit of background, but a
-  miss exposes a face.
+  alarms. For privacy, err low: a false alarm blacks out a bit of background,
+  but a miss on a frame where another face was found exposes that face.
 
 The detector sits behind a small interface (`src/detector.hpp`), so a YOLO
 xmodel can be added later without touching capture, censoring or streaming.
@@ -89,12 +95,14 @@ On Windows, allow Python/ffplay through the firewall for UDP.
 | Option | Default | Notes |
 |---|---|---|
 | `--width/--height/--fps` | 1920 1080 30 | The Smart Camera ISP also supports 3840x2160 |
-| `--detector` | `vitis` | `full-frame` blurs everything: test the camera/stream path without the DPU |
+| `--detector` | `vitis` | `full-frame` blacks out everything: test the camera/stream path without the DPU |
 | `--model` | Smart Camera's densebox_640_360 | Path to an `.xmodel` or a model name |
 | `--threshold` | 0.7 | Lower catches more faces (AMD's own default is 0.9) |
-| `--margin` | 0.25 | Extra blur around each face, as a fraction of its size |
-| `--hold` | 5 | Frames a face stays blurred after the detector loses it |
-| `--blocks` | 8 | Faces are reduced to N×N samples; lower = stronger |
+| `--margin` | 0.25 | Extra fill around each face, as a fraction of its size |
+| `--max-age` | 250 | ms a face stays filled after the detector last saw it; no current face = black frame |
+| `--scrub` | `cpu` | `pl` = hardware scrubber (needs the kv260-faceshield firmware, see [pl/README.md](pl/README.md)) |
+| `--raw-source` | | `pl` only: GStreamer source for the raw detector stream |
+| `--uio` | `/dev/uio4` | `pl` only: scrubber register device |
 | `--transport` | `tcp` | `udp` needs `--host` |
 | `--encoder` | `omx` | VCU hardware. `x264` = software (slow at 1080p on the A53s) |
 | `--bitrate` | 8000 | kbit/s |
@@ -103,29 +111,54 @@ On Windows, allow Python/ffplay through the firewall for UDP.
 
 ## Privacy behaviour
 
-- Only `censor`-processed buffers are ever handed to the encoder. There is one
-  push point in `main.cpp`, after blurring.
-- **Fail closed on errors:** if detection throws, that frame goes out black;
+Same policy as the Python prototype (`faceshield/scrubber.py`):
+
+- **Faces are destroyed, not blurred.** Every pixel in a face box (plus
+  `--margin`) is overwritten with black (Y = 16, UV = 128) in both planes.
+- **Fail closed on no face.** If no box is current, the whole frame is black.
+  An empty scene and a missed face look the same to a detector, so both
+  are blanked.
+- **Time-based hold.** A face stays filled for `--max-age` (250 ms) after the
+  detector last saw it, so a brief miss neither exposes it nor flickers to
+  black. Each face is tracked separately: if one of two faces is missed, both
+  stay covered. A slow frame rate can't stretch the hold, because it's
+  measured in time, not frames.
+- **Fail closed on errors.** If detection throws, that frame goes out black;
   after 30 failures in a row the app exits.
-- **Boxes are held** for `--hold` frames and padded by `--margin`, so a single
-  missed detection or quick movement doesn't flash a face.
-- Each frame is blurred with boxes detected on *that same frame* (no
-  one-frame lag), because the DPU is fast enough to run inline.
-- Capture keeps only the newest camera frame, so a slow frame causes a dropped
-  frame, never a growing delay. This avoids the backlog lag seen in the laptop
-  prototype.
+- Only scrubbed buffers are ever handed to the encoder. There is one push
+  point in `main.cpp`, after scrubbing.
+- Capture keeps only the newest camera frame, so a slow frame causes a
+  dropped frame, never a growing delay.
+- `--scrub pl` moves the filling into the PL scrubber, so the clean buffer
+  is masked in hardware before Linux sees it (see [pl/README.md](pl/README.md)).
 
 Limits, stated plainly:
 
 - A face the detector never finds (strong profile, very small, motion blur,
-  bad light) is not blurred. Blur reduces identifiability; it isn't a guarantee.
-- Raw frames exist in the board's ARM memory (CPU-side blur). This build meets
-  "nothing unblurred leaves the board". It does not meet the top-level README's
+  bad light) is only covered if the frame is blanked. If the detector finds
+  another face in the same frame, the missed face goes out unmasked.
+- With `--scrub cpu`, raw frames exist in the board's ARM memory before scrubbing. This build meets
+  "nothing unmasked leaves the board". It does not meet the top-level README's
   stronger goal of "no software on the board can read raw pixels", which needs
   the PL scrubber / on-chip detector described there.
 - The stream is not encrypted. Use a direct cable or a trusted network.
 
 ## What has and hasn't been verified
+
+Fail-closed rework, checked on macOS with OpenCV 5.1 (the board uses OpenCV 4):
+- `tests/test_censor.cpp` passes under AddressSanitizer and UBSan. It covers:
+  - Fill inside the box only, including row padding and chroma.
+  - The whole frame goes black when there are no valid boxes.
+  - The time-based hold: max age, a slow frame rate, and future timestamps.
+  - Multi-face partial misses.
+  - The PL driver's commit handshake, box merging and bounds check, against a fake register bank.
+- `pl/scrubber/run_csim.sh` passes (13 cases).
+- Mutation checks: deliberately breaking each fail-closed rule makes the tests fail.
+- `main.cpp` was only type-checked against stub GStreamer declarations. It
+  hasn't been compiled against real GStreamer or run since the rework. Build
+  it in the Smart Camera container (`scripts/build.sh`) before relying on it.
+
+Earlier build (blur version):
 
 Verified here, on an x86 machine without the board:
 - Unit tests: censoring changes only the face boxes, including row padding and
@@ -133,7 +166,7 @@ Verified here, on an x86 machine without the board:
 - End to end with a test video source and a software H.264 encoder: the app
   streamed over TCP and RTP/UDP, and OpenCV (as `viewer.py` uses it) decoded
   1280x720 at about 25–28 fps. With `--detector full-frame`, random noise with
-  luma stddev 63 arrived with stddev under 1, so the blur survives encoding.
+  luma stddev 63 arrived with stddev under 1 (measured with the earlier blur build; the fill is a constant, so it survives encoding trivially).
 - The Vitis AI detector code compiles against the `FaceDetect` API
   (`create`, `setThreshold`, `run`, normalized `rects`).
 
@@ -155,7 +188,9 @@ Verified here, on an x86 machine without the board:
 ```
 kv260/
   src/main.cpp         capture loop, fail-closed handling, stats
-  src/censor.*         NV12 blur, box expansion, black fill, thumbnail, box hold
+  src/censor.*         NV12 fill, fail-closed scrub, box expansion, thumbnail, time-based hold
+  src/pl_scrubber.*    driver for the PL scrubber IP (--scrub pl)
+  pl/                  PL scrubber IP (HLS), testbench, Vivado integration
   src/detector.*       Vitis AI densebox detector + full-frame bring-up detector
   src/pipeline.*       GStreamer capture / encode / transport strings
   tests/test_censor.cpp

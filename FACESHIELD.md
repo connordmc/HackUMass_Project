@@ -80,6 +80,6 @@ detection misses remains future work. Raw frames exist in application memory.
 
 ## KV260 build
 
-The on-board version (IAS camera → DPU face detection → blur → hardware H.264
+The on-board version (IAS camera → DPU face detection → fail-closed black fill → hardware H.264
 → laptop) lives in [`kv260/`](kv260/README.md). This laptop prototype is
 unchanged.
