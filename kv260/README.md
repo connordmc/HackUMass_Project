@@ -35,6 +35,69 @@ frame is black.
  Laptop: viewer.py / ffplay  (never receives an unmasked frame)
 ```
 
+## Quick start: test mode on the board, watch on the Mac
+
+For a board that is already set up (see [Setup on the board](#setup-on-the-board)
+for the first time). Test mode shows the room even when no face is detected;
+detected faces are still blacked out, and a "TEST MODE: NOT FAIL-CLOSED" bar
+is burned into every frame. Leave out `--test-no-blank` for the real
+fail-closed demo.
+
+**1. Board: get into the container** (Mac terminal):
+
+```sh
+ssh ubuntu@192.168.10.2
+cd ~/HackUMass_Project
+kv260/scripts/start_container.sh       # asks for the sudo password
+```
+
+You are now at `root@xlnx-docker:/workspace/kv260#`.
+
+**2. Board: start the app in test mode.** Pick UDP (lowest latency) or TCP:
+
+```sh
+# UDP: the board sends the video straight to the Mac (192.168.10.1)
+build/faceshield_kv260 --test-no-blank --overlay --transport udp --host 192.168.10.1 --bitrate 4000
+
+# TCP: the Mac connects to the board on port 5000
+build/faceshield_kv260 --test-no-blank --overlay
+```
+
+Wait about a minute: loading the face model onto the DPU takes that long
+before the first frame. The app then prints fps / faces / blanked every 5 s.
+`Ctrl+C` stops it.
+
+**3. Mac: watch it** (`brew install mpv ffmpeg` once). Use the line that
+matches the transport chosen above.
+
+For **UDP**, create the stream description once:
+
+```sh
+printf 'v=0\no=- 0 0 IN IP4 0.0.0.0\ns=FaceShield KV260\nc=IN IP4 0.0.0.0\nt=0 0\nm=video 5000 RTP/AVP 96\na=rtpmap:96 H264/90000\n' > ~/faceshield.sdp
+```
+
+| Transport | mpv (lowest delay) | ffplay |
+|---|---|---|
+| UDP | `mpv --profile=low-latency --untimed --no-cache '--demuxer-lavf-o=protocol_whitelist=[file,udp,rtp]' ~/faceshield.sdp` | `ffplay -protocol_whitelist file,udp,rtp -fflags nobuffer -flags low_delay -framedrop -reorder_queue_size 0 ~/faceshield.sdp` |
+| TCP | `mpv --profile=low-latency --untimed --no-cache tcp://192.168.10.2:5000` | `ffplay -probesize 32 -analyzeduration 0 -fflags nobuffer -flags low_delay -framedrop tcp://192.168.10.2:5000` |
+
+Press `q` in the video window to quit the player.
+
+If it doesn't work:
+- **zsh: no matches found** (mpv, UDP): keep the single quotes around
+  `'--demuxer-lavf-o=...'`.
+- **Nothing shows / `non-existing PPS` messages**: the app is still loading
+  (wait the minute) or isn't running. The picture appears within about a
+  second of the first frames.
+- **macOS asks to accept incoming connections** (UDP): click Allow, or the
+  packets are blocked.
+- **Gray smears or blocks** (UDP): packets are lost; lower `--bitrate`
+  (e.g. `2500`).
+- **Laggy** (TCP): start the player after the app is running, and use the
+  flags above. Plain `ffplay tcp://...` buffers several MB and stays behind.
+- **Camera busy / no frames**: stop the Python stream (`faceshield.stream`)
+  first; only one program can use the camera.
+
 ## Detector: why AMD's densebox model instead of YOLO
 
 The app uses `densebox_640_360`, the face detector that ships with AMD's Smart
