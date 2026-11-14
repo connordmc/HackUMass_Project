@@ -104,5 +104,26 @@ class ScrubberTests(unittest.TestCase):
             FailClosedScrubber(margin=float("nan"))
 
 
+class TestModeTests(unittest.TestCase):
+    def test_test_mode_passes_empty_frame_unchanged(self):
+        scrubber = FailClosedScrubber(margin=0, blank_when_empty=False)
+        frame = np.full((40, 40, 3), 200, np.uint8)
+        out, masked = scrubber.scrub(frame, now=1.0)
+        self.assertFalse(masked)
+        self.assertEqual(int(out.min()), 200)
+
+    def test_test_mode_still_masks_detected_faces(self):
+        scrubber = FailClosedScrubber(margin=0, blank_when_empty=False)
+        frame = np.full((40, 40, 3), 200, np.uint8)
+        scrubber.update([(0, 0, 10, 10)], 1.0)
+        out, masked = scrubber.scrub(frame, now=1.0)
+        self.assertTrue(masked)
+        self.assertEqual(int(out[:10, :10].max()), 0)
+        self.assertEqual(int(out[20:, 20:].min()), 200)
+
+    def test_default_is_fail_closed(self):
+        self.assertTrue(FailClosedScrubber().blank_when_empty)
+
+
 if __name__ == "__main__":
     unittest.main()

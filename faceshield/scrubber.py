@@ -35,15 +35,21 @@ class FailClosedScrubber:
 
     The frame is modified in place and is blanked entirely when no face box
     younger than `max_age_s` exists (including before the first detection).
+
+    blank_when_empty=False is a TEST MODE ONLY: frames with no current face
+    pass through unmasked (detected faces are still filled). It is fail-open
+    by design, for checking the camera and detector, never for real use.
     """
 
-    def __init__(self, margin=0.15, max_age_s=0.25, clock=time.monotonic):
+    def __init__(self, margin=0.15, max_age_s=0.25, clock=time.monotonic,
+                 blank_when_empty=True):
         if not math.isfinite(margin) or margin < 0:
             raise ValueError("margin must be a finite, nonnegative number")
         if not math.isfinite(max_age_s) or max_age_s <= 0:
             raise ValueError("max_age_s must be finite and positive")
         self.margin = margin
         self.max_age_s = max_age_s
+        self.blank_when_empty = blank_when_empty
         self._clock = clock
         self._tracked = []  # list of (box, frame_time)
 
@@ -63,11 +69,14 @@ class FailClosedScrubber:
     def scrub(self, frame, now=None):
         """Scrub `frame` in place and return (frame, passed_through).
 
-        passed_through is False when the whole frame was blanked.
+        passed_through is False when no face was masked (the whole frame was
+        blanked, or in test mode passed through unmasked).
         """
         now = self._clock() if now is None else now
         boxes = self._current_boxes(now)
         if boxes and corrupt_regions(frame, boxes, self.margin) > 0:
             return frame, True
+        if not self.blank_when_empty:
+            return frame, False  # TEST MODE: fail-open on "no face"
         frame[:] = 0
         return frame, False

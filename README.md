@@ -219,6 +219,18 @@ Other sources:
 - `--test-pattern`: no camera; checks the network path.
 - `--camera /dev/videoN`: a USB webcam.
 
+**Test mode:** add `--test-no-blank` to see the camera picture when no face is detected (useful for aiming the camera and checking the detector). Detected faces are still blacked out, but frames without a detected face go out unmasked, so this mode is **not fail-closed**. The stream shows a red "TEST MODE: NOT FAIL-CLOSED" banner and the page says so. Never use it for a real demo of the privacy guarantee.
+
+### C++ version (DPU detection, 1080p, hardware H.264)
+
+A faster on-board version runs face detection on the DPU and encodes with the
+hardware video encoder, at about 27 fps at 1080p versus about 6 fps at 640x480
+for the Python stream. It runs inside AMD's Smart Camera Docker container
+(prompt `root@xlnx-docker:/workspace/kv260#`). Setup, how to get into the
+container, running it, and low-latency viewing on the Mac are in
+[`kv260/README.md`](kv260/README.md) (PR #2). Only one of the two versions can
+use the camera at a time.
+
 ### Troubleshooting
 
 | Symptom | Cause / fix |
