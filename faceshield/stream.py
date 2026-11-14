@@ -60,9 +60,14 @@ class GstSource:
     def __init__(self, pipeline, width=640, height=480):
         self.shape = (height, width, 3)
         self.frame_bytes = width * height * 3
+        # Scale first (still in the camera's format, e.g. NV12), then convert
+        # the small frame to BGR. Converting full 1080p first took a whole A53
+        # core and capped the stream at ~2 FPS; this order is ~3.6x faster.
         command = (
             ["gst-launch-1.0", "-q"] + shlex.split(pipeline)
-            + ["!", "videoconvert", "!", "videoscale", "!",
+            + ["!", "videoscale", "n-threads=2", "!",
+               f"video/x-raw,width={width},height={height}",
+               "!", "videoconvert", "n-threads=2", "!",
                f"video/x-raw,format=BGR,width={width},height={height}",
                "!", "fdsink", "fd=1", "sync=false"]
         )
@@ -114,7 +119,8 @@ class FrameBroadcaster:
         self._jpeg = None
         self._sequence = 0
         self.closed = False
-        self.stats = {"frames": 0, "blanked": 0, "fps": 0.0, "error": None}
+        self.stats = {"frames": 0, "blanked": 0, "faces_masked": 0, "fps": 0.0,
+                      "error": None, "test_mode": False}
 
     def publish(self, jpeg_bytes):
         with self._condition:
@@ -138,9 +144,14 @@ class FrameBroadcaster:
             return self._sequence, self._jpeg
 
 
+TEST_BANNER = "TEST MODE: NOT FAIL-CLOSED"
+
+
 def run_pipeline(source, detector, scrubber, broadcaster, stop, jpeg_quality=80):
     """Capture, scrub in place, encode, publish. Stops the stream on any error."""
     params = [int(cv2.IMWRITE_JPEG_QUALITY), jpeg_quality]
+    test_mode = not scrubber.blank_when_empty
+    broadcaster.stats["test_mode"] = test_mode
     started, count = time.monotonic(), 0
     try:
         while not stop.is_set():
@@ -148,6 +159,9 @@ def run_pipeline(source, detector, scrubber, broadcaster, stop, jpeg_quality=80)
             captured_at = time.monotonic()
             scrubber.update(detector.detect(frame), captured_at)
             frame, passed = scrubber.scrub(frame)  # raw pixels destroyed here
+            if test_mode:  # burned into the image so a screenshot can't hide it
+                cv2.putText(frame, TEST_BANNER, (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.8, (0, 0, 255), 2, cv2.LINE_AA)
             ok, buffer = cv2.imencode(".jpg", frame, params)
             if not ok:
                 raise RuntimeError("JPEG encoding failed")
@@ -155,7 +169,8 @@ def run_pipeline(source, detector, scrubber, broadcaster, stop, jpeg_quality=80)
             count += 1
             stats = broadcaster.stats
             stats["frames"] += 1
-            stats["blanked"] += 0 if passed else 1
+            stats["blanked"] += 0 if passed or test_mode else 1
+            stats["faces_masked"] += 1 if passed else 0
             elapsed = time.monotonic() - started
             if elapsed >= 2:
                 stats["fps"] = round(count / elapsed, 1)
@@ -182,7 +197,8 @@ img{max-width:100%;background:#000;border:1px solid #333}
 <script>
 setInterval(async()=>{try{const s=await (await fetch('/stats')).json();
 document.getElementById('s').textContent=s.error?('stopped: '+s.error):
-`${s.fps} fps | ${s.frames} frames | ${s.blanked} blanked (no current face)`;}
+(s.test_mode?'TEST MODE (not fail-closed) | ':'')+
+`${s.fps} fps | ${s.frames} frames | ${s.faces_masked} with a face masked | ${s.blanked} blanked (no current face)`;}
 catch(e){document.getElementById('s').textContent='board unreachable';}},1000);
 </script></body></html>"""
 
@@ -283,6 +299,10 @@ def main():
     parser.add_argument("--margin", type=float, default=0.15)
     parser.add_argument("--max-age", type=float, default=0.25)
     parser.add_argument("--detect-width", type=int, default=320)
+    parser.add_argument("--test-no-blank", action="store_true",
+                        help="TEST ONLY: show frames with no detected face instead of "
+                             "blanking them (faces that are detected are still masked). "
+                             "Not fail-closed; labelled on the stream.")
     args = parser.parse_args()
     if not math.isfinite(args.margin) or args.margin < 0:
         parser.error("--margin must be finite and nonnegative")
@@ -298,8 +318,12 @@ def main():
             source = GstSource(args.gst, args.width, args.height)
         else:
             source = OpenCVSource(args.camera, args.width, args.height)
+        if args.test_no_blank:
+            print("WARNING: --test-no-blank: frames with no detected face are sent "
+                  "unmasked. Test mode only.", file=sys.stderr, flush=True)
         serve(source, HaarFaceDetector(detect_width=args.detect_width),
-              FailClosedScrubber(margin=args.margin, max_age_s=args.max_age),
+              FailClosedScrubber(margin=args.margin, max_age_s=args.max_age,
+                                 blank_when_empty=not args.test_no_blank),
               args.host, args.port, args.quality)
     except (RuntimeError, OSError, cv2.error) as error:
         print(f"FaceShield: {error}", file=sys.stderr)

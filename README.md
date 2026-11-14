@@ -219,6 +219,8 @@ Other sources:
 - `--test-pattern`: no camera; checks the network path.
 - `--camera /dev/videoN`: a USB webcam.
 
+**Test mode:** add `--test-no-blank` to see the camera picture when no face is detected (useful for aiming the camera and checking the detector). Detected faces are still blacked out, but frames without a detected face go out unmasked, so this mode is **not fail-closed**. The stream shows a red "TEST MODE: NOT FAIL-CLOSED" banner and the page says so. Never use it for a real demo of the privacy guarantee.
+
 ### Troubleshooting
 
 | Symptom | Cause / fix |
