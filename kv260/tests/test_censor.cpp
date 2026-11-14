@@ -185,6 +185,26 @@ static void test_invalid_view_rejected() {
   CHECK(threw);
 }
 
+static void test_test_mode_no_blank() {
+  // No face: the frame is left as it is (test mode only).
+  TestImage a(64, 48);
+  const TestImage original = a;
+  Nv12View va = a.view();
+  CHECK(!scrub_nv12(va, {}, 0.2f, /*blank_when_empty=*/false));
+  CHECK(a.y == original.y && a.uv == original.uv);
+  // A detected face is still filled in test mode.
+  TestImage b(64, 48);
+  Nv12View vb = b.view();
+  CHECK(scrub_nv12(vb, {{8, 8, 10, 10, 1}}, 0.0f, false));
+  CHECK(is_filled(vb, cv::Rect(8, 8, 10, 10)));
+  // The banner covers the top of the frame.
+  TestImage c(320, 240);
+  Nv12View vc = c.view();
+  draw_test_banner(vc);
+  const cv::Mat bar = vc.y_plane()(cv::Rect(0, 0, 320, 20));
+  CHECK(cv::countNonZero(bar == 16) > 0 && cv::countNonZero(bar > 200) > 0);
+}
+
 static void test_box_hold() {
   using ms = std::chrono::milliseconds;
   const auto t0 = BoxHold::Clock::now();
@@ -305,6 +325,7 @@ int main() {
   test_invalid_boxes_ignored();
   test_tiny_and_full_boxes();
   test_scrub_fails_closed();
+  test_test_mode_no_blank();
   test_fill_black();
   test_small_bgr();
   test_invalid_view_rejected();

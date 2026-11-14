@@ -5,9 +5,17 @@
 set -euo pipefail
 
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
-IMAGE=${SMARTCAM_IMAGE:-xilinx/smartcam:2022.1}
+# faceshield-smartcam is the smartcam image with the build dependencies already
+# installed (made with: docker commit <container> faceshield-smartcam:2022.1),
+# so starting the container needs no downloads. Fall back to AMD's image.
+if [ -z "${SMARTCAM_IMAGE:-}" ] && docker image inspect faceshield-smartcam:2022.1 >/dev/null 2>&1; then
+  IMAGE=faceshield-smartcam:2022.1
+else
+  IMAGE=${SMARTCAM_IMAGE:-xilinx/smartcam:2022.1}
+fi
 
-if ! xmutil listapps | grep -q kv260-smartcam; then
+# xmutil needs root, so ask dpkg whether the firmware package is installed.
+if ! dpkg -s xlnx-firmware-kv260-smartcam >/dev/null 2>&1; then
   echo "Installing the Smart Camera firmware package..."
   sudo apt-get install -y xlnx-firmware-kv260-smartcam
 fi

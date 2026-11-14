@@ -108,6 +108,7 @@ On Windows, allow Python/ffplay through the firewall for UDP.
 | `--bitrate` | 8000 | kbit/s |
 | `--source` | `mipi` | Or any GStreamer source, e.g. `"v4l2src device=/dev/video2"` for a USB webcam |
 | `--overlay` | off | Draws fps and face count into the stream |
+| `--test-no-blank` | off | **Test only, not fail-closed:** frames with no detected face are sent unmasked instead of black (detected faces are still filled). A "TEST MODE: NOT FAIL-CLOSED" bar is burned into every frame. `cpu` scrub only |
 
 ## Privacy behaviour
 

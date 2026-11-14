@@ -57,6 +57,7 @@ struct Options : StreamConfig {
   int max_failures = 30;
   long max_frames = 0;
   bool overlay = false;
+  bool test_no_blank = false;  // TEST ONLY: frames without a face not blanked
 };
 
 void usage() {
@@ -90,6 +91,9 @@ Streaming:
   --bitrate K        kbit/s (default 8000)
 Other:
   --overlay          draw fps and face count on the stream
+  --test-no-blank    TEST ONLY: send frames with no detected face unmasked
+                     instead of black (detected faces are still filled). Not
+                     fail-closed; a banner is burned into every frame. cpu only.
   --max-frames N     stop after N frames (testing)
 )";
 }
@@ -100,6 +104,7 @@ Options parse(int argc, char** argv) {
     const std::string a = argv[i];
     if (a == "-h" || a == "--help") { usage(); std::exit(0); }
     if (a == "--overlay") { o.overlay = true; continue; }
+    if (a == "--test-no-blank") { o.test_no_blank = true; continue; }
     if (i + 1 >= argc) throw std::invalid_argument("missing value for " + a);
     const std::string v = argv[++i];
     if (a == "--source") o.source = v;
@@ -133,6 +138,10 @@ Options parse(int argc, char** argv) {
     throw std::invalid_argument("--scrub must be cpu or pl");
   if (o.scrub == "pl" && o.raw_source.empty())
     throw std::invalid_argument("--scrub pl needs --raw-source");
+  if (o.test_no_blank && o.scrub == "pl")
+    throw std::invalid_argument(
+        "--test-no-blank is cpu only: the PL scrubber always blanks frames "
+        "without a face");
   if (o.scrub == "pl" && !pl_regs::kGenerated)
     throw std::invalid_argument(
         "--scrub pl: src/pl_scrubber_regs.hpp holds predicted offsets; "
@@ -299,6 +308,9 @@ int run(const Options& o) {
   std::cerr << "detector: " << o.detector << " input " << det_size.width << "x"
             << det_size.height << ", scrub: " << o.scrub << "\n";
   const bool pl = o.scrub == "pl";
+  if (o.test_no_blank)
+    std::cerr << "WARNING: --test-no-blank: frames with no detected face are "
+                 "sent unmasked. Test mode only.\n";
 
   // In pl mode, opening the scrubber first means a missing IP fails before
   // anything is captured.
@@ -432,15 +444,18 @@ int run(const Options& o) {
         det_ms = ms_since(td);
         faces = boxes.size();
         // Fail closed: fills every face, or blacks out the whole frame if
-        // no face is current.
-        blanked = !scrub_nv12(view, boxes, o.margin);
+        // no face is current (not in --test-no-blank).
+        const bool masked =
+            scrub_nv12(view, boxes, o.margin, !o.test_no_blank);
+        blanked = !masked && !o.test_no_blank;
         failures = 0;
       } catch (const std::exception& e) {
-        fill_black(view);  // never send a frame we could not scrub
-        blanked = true;
+        fill_black(view);  // never send a frame we could not scrub, even
+        blanked = true;    // in test mode
         on_detect_error(e);
       }
     }
+    if (o.test_no_blank) draw_test_banner(view);
     if (o.overlay) {
       char text[112];
       std::snprintf(text, sizeof text,
@@ -448,7 +463,8 @@ int run(const Options& o) {
                     o.scrub.c_str(), fps, faces, faces == 1 ? "" : "s",
                     blanked ? "  (blanked)" : "");
       cv::Mat y = view.y_plane();
-      cv::putText(y, text, {20, 50}, cv::FONT_HERSHEY_SIMPLEX, h / 900.0,
+      const int text_y = o.test_no_blank ? h / 12 + 50 : 50;
+      cv::putText(y, text, {20, text_y}, cv::FONT_HERSHEY_SIMPLEX, h / 900.0,
                   cv::Scalar(235), 2, cv::LINE_AA);
     }
     gst_buffer_unmap(frame, &map);

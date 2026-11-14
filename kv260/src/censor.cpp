@@ -80,10 +80,22 @@ int censor_nv12(Nv12View& image, const std::vector<Box>& boxes, float margin) {
   return filled;
 }
 
-bool scrub_nv12(Nv12View& image, const std::vector<Box>& boxes, float margin) {
+bool scrub_nv12(Nv12View& image, const std::vector<Box>& boxes, float margin,
+                bool blank_when_empty) {
   if (censor_nv12(image, boxes, margin) > 0) return true;
-  fill_black(image);  // no current face: nothing of this frame goes out
+  // No current face: nothing of this frame goes out (unless in test mode).
+  if (blank_when_empty) fill_black(image);
   return false;
+}
+
+void draw_test_banner(Nv12View& image) {
+  check_view(image);
+  const int bar = std::max(2, (image.height / 12) & ~1);
+  fill_region(image, cv::Rect(0, 0, image.width, bar));
+  cv::Mat y = image.y_plane();
+  cv::putText(y, "TEST MODE: NOT FAIL-CLOSED", {bar / 4, bar * 3 / 4},
+              cv::FONT_HERSHEY_SIMPLEX, bar / 40.0, cv::Scalar(235),
+              std::max(1, bar / 20), cv::LINE_AA);
 }
 
 void fill_black(Nv12View& image) {

@@ -54,7 +54,14 @@ int censor_nv12(Nv12View& image, const std::vector<Box>& boxes, float margin);
 
 // Fail-closed scrub: fills every valid box and returns true, or, if no box
 // maps to a valid region, blacks out the whole frame and returns false.
-bool scrub_nv12(Nv12View& image, const std::vector<Box>& boxes, float margin);
+// blank_when_empty = false is a TEST MODE ONLY (--test-no-blank): a frame
+// with no valid box is left unmasked instead (still returns false).
+bool scrub_nv12(Nv12View& image, const std::vector<Box>& boxes, float margin,
+                bool blank_when_empty = true);
+
+// Burns a "TEST MODE: NOT FAIL-CLOSED" bar into the top of the image, so a
+// frame from the test mode can never pass for the secure mode.
+void draw_test_banner(Nv12View& image);
 
 // Overwrites the whole image with black.
 void fill_black(Nv12View& image);

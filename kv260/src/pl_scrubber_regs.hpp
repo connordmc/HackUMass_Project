@@ -3,9 +3,9 @@
 // PREDICTED, not generated: Vitis HLS assigns these at synthesis. After
 // running pl/scrubber/run_hls.tcl, regenerate this file from the real
 // driver header with:
-//   python3 pl/scrubber/gen_regs.py \
-//     pl/scrubber/faceshield_scrubber_prj/solution1/impl/ip/drivers/*/src/xfaceshield_scrubber_hw.h \
+//   python3 pl/scrubber/gen_regs.py <HLS export>/drivers/*/src/xfaceshield_scrubber_hw.h
 //     > src/pl_scrubber_regs.hpp
+// where <HLS export> is pl/scrubber/faceshield_scrubber_prj/solution1/impl/ip
 #pragma once
 
 #include <cstdint>

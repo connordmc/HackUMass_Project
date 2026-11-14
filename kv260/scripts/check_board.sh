@@ -36,7 +36,9 @@ fi
 # even when the AR1335 sensor behind it is unplugged or unpowered. The ISP
 # logs "NACK 0x6c" when the sensor does not answer on I2C (seen when a capture
 # is attempted), so check the kernel log as well.
-if have journalctl; then
+if [ -f /.dockerenv ]; then
+  warn "inside the container the host kernel log is not visible; run this script on the host too to check the AR1335 sensor"
+elif have journalctl; then
   if journalctl -k -b --no-pager 2>/dev/null | grep -q 'NACK 0x6c'; then
     fail "AR1335 sensor is not answering the AP1302 (NACK 0x6c in the kernel log): power off, reseat the ribbon cable on J7 (IAS0), contacts facing the connector's contacts, latches closed"
   else
@@ -52,10 +54,16 @@ for e in mediasrcbin omxh264enc h264parse mpegtsmux tcpserversink rtph264pay app
 done
 
 echo "== DPU and model"
-if have xdputil; then
-  if xdputil query 2>/dev/null | grep -qi 'DPU'; then pass "DPU visible to xdputil"; else fail "xdputil sees no DPU"; fi
+# xdputil is a Python tool; in the smartcam 2022.1 container it crashes on a
+# missing numpy, which says nothing about the DPU. Only trust a clean run.
+dpu_out=$(xdputil query 2>&1)
+if have xdputil && ! printf '%s' "$dpu_out" | grep -q 'Traceback'; then
+  if printf '%s' "$dpu_out" | grep -qi 'DPU'; then pass "DPU visible to xdputil"; else fail "xdputil sees no DPU"; fi
 else
-  warn "xdputil not found; skipped DPU query"
+  warn "xdputil unavailable or crashed; checking the DPU firmware instead"
+  xclbin=$(sed -n 's/^firmware:[[:space:]]*//p' /etc/vart.conf 2>/dev/null)
+  if [ -n "$xclbin" ] && [ -f "$xclbin" ]; then pass "DPU firmware $xclbin present"; else fail "DPU firmware (xclbin from /etc/vart.conf) not found"; fi
+  if ls /dev/dri/renderD* >/dev/null 2>&1; then pass "DRM render node for the DPU present"; else fail "no /dev/dri/renderD* (zocl not loaded?)"; fi
 fi
 [ -e /etc/vart.conf ] && pass "/etc/vart.conf present" || warn "/etc/vart.conf missing (mount it into the container)"
 [ -f "$MODEL" ] && pass "densebox_640_360 model present" || fail "model not found at $MODEL"
