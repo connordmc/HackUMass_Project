@@ -1,6 +1,8 @@
+# HackUMass Project
+
 **Redaction of sensitive information at the camera, in hardware, before any pixel reaches the network.**
 
-Built on the AMD Kria KV260 for [Hackathon Name].
+Built on the AMD Kria KV260 for HackUMass.
 
 ---
 
@@ -160,4 +162,5 @@ In the hackathon build the raw frame sits in a reserved DDR region. That keeps i
 
 ## Team
 
-- [Name] — [role]
+- Connor McLaughlin
+- Rajit Talluri
