@@ -30,7 +30,11 @@ std::string output_pipeline(const StreamConfig& c, int width, int height) {
     << " ! queue leaky=downstream max-size-buffers=2 ! ";
   if (c.encoder == "omx") {
     // Zynq UltraScale+ VCU: hardware H.264, keeps the ARM cores free.
+    // periodicity-idr: without it the VCU sends one IDR at the start and
+    // plain I-frames after, so h264parse never repeats SPS/PPS and a viewer
+    // that connects later can never start decoding ("non-existing PPS").
     s << "omxh264enc gop-mode=basic gop-length=" << c.fps
+      << " periodicity-idr=" << c.fps
       << " b-frames=0 control-rate=constant target-bitrate=" << c.bitrate_kbps
       << " ! video/x-h264,profile=high";
   } else if (c.encoder == "x264") {

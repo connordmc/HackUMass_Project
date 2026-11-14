@@ -308,6 +308,9 @@ static void test_pipelines() {
   CHECK(cap.find("max-buffers=1 drop=true") != std::string::npos);
   const std::string out = output_pipeline(c, 1920, 1080);
   CHECK(out.find("omxh264enc") != std::string::npos);
+  // A viewer joining mid-stream needs an IDR (with SPS/PPS) every second.
+  CHECK(out.find("periodicity-idr=30") != std::string::npos);
+  CHECK(out.find("config-interval=-1") != std::string::npos);
   CHECK(out.find("tcpserversink host=0.0.0.0 port=5000") != std::string::npos);
   c.transport = "udp";
   bool threw = false;

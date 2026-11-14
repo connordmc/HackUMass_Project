@@ -55,40 +55,158 @@ xmodel can be added later without touching capture, censoring or streaming.
 
 ## Setup on the board
 
-You need the KV260 running Kria Ubuntu 22.04, the AR1335 module plugged into
-the IAS connector as in AMD's Smart Camera setup guide, and Ethernet to the
-same network as the laptop.
+Tested on Kria Ubuntu 22.04 with the AR1335 module on **J7 (IAS0)**. The
+board is connected to the Mac by a direct Ethernet cable (board
+`192.168.10.2`, Mac `192.168.10.1`); see the top-level README for the
+network, SSH and camera-cable setup.
+
+### One-time setup (needs internet on the board, ~1 GB)
+
+The board has no Wi-Fi. If the Mac is on Wi-Fi (or an iPhone hotspot), it can
+share its connection over the cable:
 
 ```sh
-git clone <this repo> && cd HackUMass_Project
-git checkout claude/nice-galileo-lp3znj
-kv260/scripts/start_container.sh     # loads smartcam firmware, opens container
-# --- inside the container (/workspace/kv260) ---
-scripts/check_board.sh               # camera, ISP, DPU, encoder, model, headers
-scripts/build.sh                     # builds and runs unit tests
-build/faceshield_kv260 --overlay     # streams on tcp port 5000
+# Mac: forward the board's traffic out through Wi-Fi (en0)
+route -n get default | grep interface        # use this interface below if not en0
+sudo sysctl -w net.inet.ip.forwarding=1
+echo "nat on en0 from 192.168.10.0/24 to any -> (en0)" | sudo pfctl -a com.apple/faceshield -f -
+sudo pfctl -E                                 # the ALTQ / "-f" warnings are normal
+
+# Board: use the Mac as router and set DNS, then check
+sudo nmcli con mod direct ipv4.gateway 192.168.10.1 ipv4.dns "1.1.1.1 8.8.8.8"
+sudo nmcli con up direct                      # SSH may freeze for a few seconds
+ping -c 3 google.com
 ```
 
-Every 5 seconds the app prints fps, DPU time and faces per frame. Stop it
-with Ctrl+C.
+Then install Docker and give your user access to it:
+
+```sh
+sudo apt update                               # the final "apt-check" step is slow, wait for the prompt
+sudo apt install -y docker.io
+sudo usermod -aG docker ubuntu
+exit                                          # log out and SSH back in for the group to apply
+docker run --rm hello-world
+```
+
+Copy the code to the board from the Mac (or `git clone` on the board):
+
+```sh
+# Mac, repository root, on this branch
+rsync -a --exclude .git --exclude .venv ./ ubuntu@192.168.10.2:~/HackUMass_Project/
+```
+
+Open the container and build (first time downloads the 0.56 GB Smart Camera
+image plus compilers and libraries):
+
+```sh
+cd ~/HackUMass_Project
+kv260/scripts/start_container.sh
+# now at root@xlnx-docker:/workspace/kv260#
+scripts/check_board.sh
+scripts/build.sh                              # builds and runs the unit tests
+```
+
+Save the container with everything installed, so later starts need no
+downloads (run on the board, in a second SSH session, while the container is
+open):
+
+```sh
+docker commit $(docker ps -q | head -1) faceshield-smartcam:2022.1
+```
+
+`start_container.sh` uses `faceshield-smartcam:2022.1` automatically when it
+exists. After this the board needs no internet; undo the sharing on the Mac:
+
+```sh
+sudo pfctl -a com.apple/faceshield -F all
+sudo sysctl -w net.inet.ip.forwarding=0
+```
+
+### Getting into the container (`root@xlnx-docker:/workspace/kv260#`)
+
+Every time, after SSHing into the board:
+
+```sh
+ssh ubuntu@192.168.10.2
+cd ~/HackUMass_Project
+kv260/scripts/start_container.sh
+```
+
+It loads the Smart Camera firmware (camera, DPU, encoder; asks for your sudo
+password), starts the container and leaves you at
+`root@xlnx-docker:/workspace/kv260#`. `~/HackUMass_Project` on the board is
+`/workspace` inside, so the build in `kv260/build/` survives restarts.
+`exit` leaves (and removes) the container.
+
+To open a **second shell in the same running container** (e.g. while the app
+runs in the first):
+
+```sh
+docker exec -it $(docker ps -q | head -1) bash -c "cd /workspace/kv260 && exec bash"
+```
+
+Only one program can use the camera: stop the Python stream
+(`faceshield.stream`) before running the C++ app, and vice versa.
+
+### Running it
+
+Inside the container. Wait about a minute after starting: loading the face
+model onto the DPU takes that long before the first frame (a viewer that
+connects earlier just sees nothing yet).
+
+```sh
+# Fail-closed demo, UDP straight to the Mac (lowest latency)
+build/faceshield_kv260 --overlay --transport udp --host 192.168.10.1 --bitrate 4000
+
+# Same over TCP (any number of viewers can connect at any time)
+build/faceshield_kv260 --overlay
+
+# Test mode: show frames with no detected face instead of black
+build/faceshield_kv260 --overlay --test-no-blank --transport udp --host 192.168.10.1 --bitrate 4000
+```
+
+Every 5 seconds the app prints fps, DPU time, faces per frame and how many
+frames were blanked. `Ctrl+C` stops it. The `GStreamer-CRITICAL ...
+IS_MUTABLE` lines at start and "The specified Level is too low" come from
+AMD's camera and encoder plugins and are harmless.
 
 ## Watching on the laptop
 
-```sh
-python kv260/laptop/viewer.py --host <kv260-ip>
-# or, without Python:
-ffplay -fflags nobuffer -flags low_delay -framedrop tcp://<kv260-ip>:5000
-```
+Install a player once: `brew install mpv ffmpeg`.
 
-`viewer.py` reconnects if the board restarts. For UDP (lower latency, but you
-must name the laptop's address):
+**UDP** (`--transport udp`). Create the stream description once (RTP doesn't
+describe itself), then play it:
 
 ```sh
-build/faceshield_kv260 --transport udp --host <laptop-ip>           # board
-python kv260/laptop/viewer.py --sdp kv260/laptop/stream.sdp         # laptop
+printf 'v=0\no=- 0 0 IN IP4 0.0.0.0\ns=FaceShield KV260\nc=IN IP4 0.0.0.0\nt=0 0\nm=video 5000 RTP/AVP 96\na=rtpmap:96 H264/90000\n' > ~/faceshield.sdp
+
+mpv --profile=low-latency --untimed --no-cache '--demuxer-lavf-o=protocol_whitelist=[file,udp,rtp]' ~/faceshield.sdp
+# or
+ffplay -protocol_whitelist file,udp,rtp -fflags nobuffer -flags low_delay -framedrop -reorder_queue_size 0 ~/faceshield.sdp
 ```
 
-On Windows, allow Python/ffplay through the firewall for UDP.
+(The same file is in the repo as `kv260/laptop/stream.sdp`.) Keep the quotes
+around the `--demuxer-lavf-o=...` option: without them zsh treats the
+brackets as a filename pattern ("no matches found"). If macOS asks whether
+mpv/ffplay may accept incoming connections, allow it, or the packets are
+blocked. Gray smears or blocks mean lost packets: lower `--bitrate`.
+
+**TCP** (default transport):
+
+```sh
+mpv --profile=low-latency --untimed --no-cache tcp://192.168.10.2:5000
+# or
+ffplay -probesize 32 -analyzeduration 0 -fflags nobuffer -flags low_delay -framedrop tcp://192.168.10.2:5000
+```
+
+Plain `ffplay tcp://...` without those flags reads several MB before playing
+and then stays that far behind. `python kv260/laptop/viewer.py --host
+192.168.10.2` (or `--sdp kv260/laptop/stream.sdp` for UDP) also works and
+reconnects if the board restarts, but buffers more than mpv.
+
+The encoder sends a keyframe with its parameter sets every second, so a viewer
+can join at any time; the picture appears within about a second of
+connecting (after the start-up minute above).
 
 ## Options
 
@@ -105,7 +223,7 @@ On Windows, allow Python/ffplay through the firewall for UDP.
 | `--uio` | `/dev/uio4` | `pl` only: scrubber register device |
 | `--transport` | `tcp` | `udp` needs `--host` |
 | `--encoder` | `omx` | VCU hardware. `x264` = software (slow at 1080p on the A53s) |
-| `--bitrate` | 8000 | kbit/s |
+| `--bitrate` | 8000 | kbit/s. For UDP, 2500–4000 avoids packet loss on big keyframes |
 | `--source` | `mipi` | Or any GStreamer source, e.g. `"v4l2src device=/dev/video2"` for a USB webcam |
 | `--overlay` | off | Draws fps and face count into the stream |
 | `--test-no-blank` | off | **Test only, not fail-closed:** frames with no detected face are sent unmasked instead of black (detected faces are still filled). A "TEST MODE: NOT FAIL-CLOSED" bar is burned into every frame. `cpu` scrub only |
@@ -146,43 +264,26 @@ Limits, stated plainly:
 
 ## What has and hasn't been verified
 
-Fail-closed rework, checked on macOS with OpenCV 5.1 (the board uses OpenCV 4):
-- `tests/test_censor.cpp` passes under AddressSanitizer and UBSan. It covers:
-  - Fill inside the box only, including row padding and chroma.
-  - The whole frame goes black when there are no valid boxes.
-  - The time-based hold: max age, a slow frame rate, and future timestamps.
-  - Multi-face partial misses.
-  - The PL driver's commit handshake, box merging and bounds check, against a fake register bank.
-- `pl/scrubber/run_csim.sh` passes (13 cases).
-- Mutation checks: deliberately breaking each fail-closed rule makes the tests fail.
-- `main.cpp` was only type-checked against stub GStreamer declarations. It
-  hasn't been compiled against real GStreamer or run since the rework. Build
-  it in the Smart Camera container (`scripts/build.sh`) before relying on it.
+**On the KV260** (Kria Ubuntu 22.04, smartcam 2022.1 container, AR1335 on J7):
+- Builds with no warnings; `ctest` passes on the board (`censor`, `pl_scrubber`).
+- `mediasrcbin` delivers 1920x1080 NV12. The DPU densebox detector runs at
+  ~21 ms per frame, and the whole loop at **27–28 fps at 1080p**
+  (25–31 ms per frame).
+- With no face in view every frame is blanked (fail-closed). With
+  `--test-no-blank`, frames pass through with the banner (decoded frame
+  checked on the Mac). `--scrub pl --test-no-blank` is rejected.
+- TCP stream decodes on macOS (ffmpeg) when joining mid-stream, after adding
+  periodic IDR frames to the encoder.
 
-Earlier build (blur version):
+**Not yet verified:**
+- Masking a live face on the board (the camera faced the ceiling in all runs
+  so far).
+- UDP end to end on the Mac, and the remaining viewing latency.
+- `--scrub pl` (needs the PL scrubber bitstream; see [pl/README.md](pl/README.md)).
 
-Verified here, on an x86 machine without the board:
-- Unit tests: censoring changes only the face boxes, including row padding and
-  chroma; malformed boxes are ignored; box hold; black fill; pipeline strings.
-- End to end with a test video source and a software H.264 encoder: the app
-  streamed over TCP and RTP/UDP, and OpenCV (as `viewer.py` uses it) decoded
-  1280x720 at about 25–28 fps. With `--detector full-frame`, random noise with
-  luma stddev 63 arrived with stddev under 1 (measured with the earlier blur build; the fill is a constant, so it survives encoding trivially).
-- The Vitis AI detector code compiles against the `FaceDetect` API
-  (`create`, `setThreshold`, `run`, normalized `rects`).
-
-**Not yet run on a KV260.** Check these first on the board:
-- `mediasrcbin` capture of the AR1335 at 1080p NV12 with `io-mode=mmap`.
-  If it fails, try the exact source string the Smart Camera app prints.
-- `omxh264enc` property names on your image's version. `--encoder` takes a
-  replacement string if one is rejected.
-- That the Smart Camera container has the Vitis AI Library *headers*
-  (`check_board.sh` reports this). If not, install the Vitis AI Library dev
-  package that matches the container's Vitis AI version (2.5 for smartcam
-  2022.1).
-- Real frame rate and DPU time. Expect DPU inference to be a few milliseconds;
-  the CPU copy and thumbnail are the main per-frame costs at 1080p. If needed,
-  run at 1280x720 or move the thumbnail step into the PL.
+**Host checks** (macOS, OpenCV 5.1): `tests/test_censor.cpp` passes under
+AddressSanitizer and UBSan, `pl/scrubber/run_csim.sh` passes (13 cases), and
+deliberately breaking each fail-closed rule makes the tests fail.
 
 ## Files
 
