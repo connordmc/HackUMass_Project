@@ -20,27 +20,11 @@ def blur_faces(frame, bounding_boxes, margin=0.15):
         raise ValueError("frame must be a nonempty BGR image")
 
     processed = frame.copy()
-    image_height, image_width = frame.shape[:2]
     for box in bounding_boxes:
-        try:
-            x, y, width, height = (float(value) for value in box)
-        except (TypeError, ValueError, OverflowError):
+        clipped = clip_box(box, frame.shape, margin)
+        if clipped is None:
             continue
-        if not all(math.isfinite(v) for v in (x, y, width, height)):
-            continue
-        if width <= 0 or height <= 0:
-            continue
-        # Reject boxes entirely outside the frame before expanding their margin.
-        if x >= image_width or y >= image_height or x + width <= 0 or y + height <= 0:
-            continue
-        # Clip before rounding so even very large finite boxes remain safe.
-        left = math.floor(max(0, x - width * margin))
-        top = math.floor(max(0, y - height * margin))
-        right = math.ceil(min(image_width, x + width + width * margin))
-        bottom = math.ceil(min(image_height, y + height + height * margin))
-        if right <= left or bottom <= top:
-            continue
-
+        left, top, right, bottom = clipped
         region = processed[top:bottom, left:right]
         # Reduce detail to at most 8x8 samples first. This makes the smoothing
         # strong even for large close-up faces without huge Gaussian kernels.
@@ -51,3 +35,31 @@ def blur_faces(frame, bounding_boxes, margin=0.15):
             small, (right - left, bottom - top), interpolation=cv2.INTER_LINEAR
         )
     return processed
+
+
+def clip_box(box, frame_shape, margin):
+    """Return integer (left, top, right, bottom) for an (x, y, w, h) box.
+
+    The margin is added and the result clipped to the frame. Returns None for
+    malformed, non-finite, nonpositive, or off-image boxes.
+    """
+    try:
+        x, y, width, height = (float(value) for value in box)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not all(math.isfinite(v) for v in (x, y, width, height)):
+        return None
+    if width <= 0 or height <= 0:
+        return None
+    image_height, image_width = frame_shape[:2]
+    # Reject boxes entirely outside the frame before expanding their margin.
+    if x >= image_width or y >= image_height or x + width <= 0 or y + height <= 0:
+        return None
+    # Clip before rounding so even very large finite boxes remain safe.
+    left = math.floor(max(0, x - width * margin))
+    top = math.floor(max(0, y - height * margin))
+    right = math.ceil(min(image_width, x + width + width * margin))
+    bottom = math.ceil(min(image_height, y + height + height * margin))
+    if right <= left or bottom <= top:
+        return None
+    return left, top, right, bottom
