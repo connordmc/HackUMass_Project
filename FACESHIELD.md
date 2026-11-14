@@ -77,3 +77,9 @@ faces, and faces in poor lighting. Missed faces and frames with no detections
 remain unchanged, and blur is not proof of anonymity. Exceptions terminate
 the loop without displaying a raw fallback, but fail-closed behavior for
 detection misses remains future work. Raw frames exist in application memory.
+
+## KV260 build
+
+The on-board version (IAS camera → DPU face detection → blur → hardware H.264
+→ laptop) lives in [`kv260/`](kv260/README.md). This laptop prototype is
+unchanged.
