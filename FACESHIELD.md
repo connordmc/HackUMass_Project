@@ -162,3 +162,11 @@ counters). Other endpoints: `/stream` (MJPEG), `/frame.jpg` (one frame),
 `/stats` (JSON). Verified board → Mac over the direct cable at ~11 FPS with
 the test pattern. The transport is unencrypted HTTP; it only ever carries
 scrubbed frames, but anyone on the link can watch them.
+
+## KV260 C++ build
+
+The faster on-board version (IAS camera → DPU face detection → fail-closed
+black fill → hardware H.264 → laptop, ~27 fps at 1080p) lives in
+[`kv260/`](kv260/README.md), with its own setup and container guide. It
+applies the same policy as this prototype: faces filled, 250 ms hold, whole
+frame black when no face is current.

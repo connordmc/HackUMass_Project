@@ -1,0 +1,176 @@
+#include "censor.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <stdexcept>
+
+#include <opencv2/imgproc.hpp>
+
+namespace faceshield {
+
+cv::Mat Nv12View::y_plane() const {
+  return cv::Mat(height, width, CV_8UC1, y, static_cast<size_t>(y_stride));
+}
+
+cv::Mat Nv12View::uv_plane() const {
+  return cv::Mat(height / 2, width / 2, CV_8UC2, uv,
+                 static_cast<size_t>(uv_stride));
+}
+
+static void check_view(const Nv12View& image) {
+  if (!image.y || !image.uv || image.width <= 0 || image.height <= 0 ||
+      image.width % 2 || image.height % 2 || image.y_stride < image.width ||
+      image.uv_stride < image.width) {
+    throw std::invalid_argument("invalid NV12 image");
+  }
+}
+
+bool expand_and_clip(const Box& box, float margin, int image_width,
+                     int image_height, cv::Rect& out) {
+  const double x = box.x, y = box.y, w = box.width, h = box.height;
+  if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(w) ||
+      !std::isfinite(h) || !std::isfinite(margin) || margin < 0) {
+    return false;
+  }
+  if (w <= 0 || h <= 0) return false;
+  if (x >= image_width || y >= image_height || x + w <= 0 || y + h <= 0) {
+    return false;
+  }
+  // Clip in floating point before converting, so huge boxes stay safe.
+  const double left = std::max(0.0, x - w * margin);
+  const double top = std::max(0.0, y - h * margin);
+  const double right = std::min<double>(image_width, x + w + w * margin);
+  const double bottom = std::min<double>(image_height, y + h + h * margin);
+  // Round outward to even coordinates (image dimensions are even).
+  int l = static_cast<int>(std::floor(left)) & ~1;
+  int t = static_cast<int>(std::floor(top)) & ~1;
+  int r = static_cast<int>(std::ceil(right));
+  int b = static_cast<int>(std::ceil(bottom));
+  r = std::min(image_width, r + (r & 1));
+  b = std::min(image_height, b + (b & 1));
+  if (r <= l || b <= t) return false;
+  out = cv::Rect(l, t, r - l, b - t);
+  return true;
+}
+
+void fill_region(Nv12View& image, const cv::Rect& region) {
+  check_view(image);
+  const cv::Rect bounds(0, 0, image.width, image.height);
+  if ((region & bounds) != region || region.empty() || region.x % 2 ||
+      region.y % 2 || region.width % 2 || region.height % 2) {
+    throw std::invalid_argument("region must be even-aligned and in bounds");
+  }
+  image.y_plane()(region).setTo(cv::Scalar(16));
+  const cv::Rect chroma(region.x / 2, region.y / 2, region.width / 2,
+                        region.height / 2);
+  image.uv_plane()(chroma).setTo(cv::Scalar(128, 128));
+}
+
+int censor_nv12(Nv12View& image, const std::vector<Box>& boxes, float margin) {
+  check_view(image);
+  int filled = 0;
+  for (const Box& box : boxes) {
+    cv::Rect region;
+    if (expand_and_clip(box, margin, image.width, image.height, region)) {
+      fill_region(image, region);
+      ++filled;
+    }
+  }
+  return filled;
+}
+
+bool scrub_nv12(Nv12View& image, const std::vector<Box>& boxes, float margin,
+                bool blank_when_empty) {
+  if (censor_nv12(image, boxes, margin) > 0) return true;
+  // No current face: nothing of this frame goes out (unless in test mode).
+  if (blank_when_empty) fill_black(image);
+  return false;
+}
+
+void draw_test_banner(Nv12View& image) {
+  check_view(image);
+  const int bar = std::max(2, (image.height / 12) & ~1);
+  fill_region(image, cv::Rect(0, 0, image.width, bar));
+  cv::Mat y = image.y_plane();
+  cv::putText(y, "TEST MODE: NOT FAIL-CLOSED", {bar / 4, bar * 3 / 4},
+              cv::FONT_HERSHEY_SIMPLEX, bar / 40.0, cv::Scalar(235),
+              std::max(1, bar / 20), cv::LINE_AA);
+}
+
+void fill_black(Nv12View& image) {
+  check_view(image);
+  image.y_plane().setTo(cv::Scalar(16));          // video-range black
+  image.uv_plane().setTo(cv::Scalar(128, 128));   // no colour
+}
+
+cv::Mat small_bgr_from_nv12(const Nv12View& image, int out_width,
+                            int out_height) {
+  check_view(image);
+  if (out_width <= 0 || out_height <= 0 || out_width % 2 || out_height % 2) {
+    throw std::invalid_argument("detector size must be positive and even");
+  }
+  cv::Mat nv12(out_height * 3 / 2, out_width, CV_8UC1);
+  cv::Mat y_small = nv12.rowRange(0, out_height);
+  cv::resize(image.y_plane(), y_small, y_small.size(), 0, 0, cv::INTER_AREA);
+  cv::Mat uv_small(out_height / 2, out_width / 2, CV_8UC2,
+                   nv12.ptr(out_height), nv12.step);
+  cv::resize(image.uv_plane(), uv_small, uv_small.size(), 0, 0,
+             cv::INTER_AREA);
+  cv::Mat bgr;
+  cv::cvtColor(nv12, bgr, cv::COLOR_YUV2BGR_NV12);
+  return bgr;
+}
+
+float iou(const Box& a, const Box& b) {
+  const float l = std::max(a.x, b.x), t = std::max(a.y, b.y);
+  const float r = std::min(a.x + a.width, b.x + b.width);
+  const float btm = std::min(a.y + a.height, b.y + b.height);
+  const float inter = std::max(0.f, r - l) * std::max(0.f, btm - t);
+  const float uni = a.width * a.height + b.width * b.height - inter;
+  return uni > 0 ? inter / uni : 0.f;
+}
+
+BoxHold::BoxHold(std::chrono::milliseconds max_age, float match_iou)
+    : max_age_(max_age), match_iou_(match_iou) {
+  if (max_age_.count() <= 0) throw std::invalid_argument("max_age must be > 0");
+}
+
+std::vector<Box> BoxHold::update(const std::vector<Box>& detections,
+                                 Clock::time_point captured_at) {
+  std::vector<bool> used(detections.size(), false);
+  for (Track& track : tracks_) {
+    int best = -1;
+    float best_iou = match_iou_;
+    for (size_t i = 0; i < detections.size(); ++i) {
+      if (used[i]) continue;
+      const float overlap = iou(track.box, detections[i]);
+      if (overlap >= best_iou) {
+        best_iou = overlap;
+        best = static_cast<int>(i);
+      }
+    }
+    if (best >= 0) {
+      used[best] = true;
+      track.box = detections[best];
+      track.last_seen = captured_at;
+    }
+  }
+  for (size_t i = 0; i < detections.size(); ++i) {
+    if (!used[i]) tracks_.push_back({detections[i], captured_at});
+  }
+  // Drop stale tracks, and any stamped in the future (clock misuse): neither
+  // can vouch for where a face is in this frame.
+  tracks_.erase(std::remove_if(tracks_.begin(), tracks_.end(),
+                               [&](const Track& t) {
+                                 return t.last_seen > captured_at ||
+                                        captured_at - t.last_seen > max_age_;
+                               }),
+                tracks_.end());
+  std::vector<Box> out;
+  out.reserve(tracks_.size());
+  for (const Track& track : tracks_) out.push_back(track.box);
+  return out;
+}
+
+}  // namespace faceshield
